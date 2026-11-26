@@ -180,10 +180,11 @@ def main() -> int:
                 errors.append(f"{path}: message {index}: invalid translation type {new_type!r}")
                 continue
             if new_type in ("vanished", "obsolete"):
-                errors.append(
-                    f"{path}: message {index}: translators cannot mark a message "
-                    f"{new_type!r}"
-                )
+                if new_type != old_type:
+                    errors.append(
+                        f"{path}: message {index}: translators cannot mark a message "
+                        f"{new_type!r}"
+                    )
                 continue
             if old_type in ("vanished", "obsolete") and new_type != old_type:
                 errors.append(
