@@ -1,0 +1,64 @@
+name: Validate translations
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Qt Linguist tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxml2-utils qttools5-dev-tools
+
+      - name: Check XML
+        run: |
+          set -euo pipefail
+          for file in *.ts; do
+            xmllint --noout "$file"
+          done
+
+      - name: Validate structure and placeholders
+        run: python3 scripts/validate.py
+
+      - name: Reject non-translation changes
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/check_diff.py "origin/${{ github.base_ref }}"
+
+      - name: Compile with lrelease
+        run: |
+          set -euo pipefail
+          LRELEASE=$(command -v lrelease-qt6 || command -v lrelease-qt5 || command -v lrelease || ls /usr/lib/qt6/bin/lrelease /usr/lib/qt5/bin/lrelease 2>/dev/null | head -n1 || true)
+          if [ -z "$LRELEASE" ]; then
+            echo "::error::lrelease not found on the runner"
+            exit 1
+          fi
+          echo "Using $LRELEASE"
+          mkdir -p "$RUNNER_TEMP/qm"
+          for file in *.ts; do
+            "$LRELEASE" "$file" -qm "$RUNNER_TEMP/qm/${file%.ts}.qm" >/dev/null
+          done
+          test "$(find "$RUNNER_TEMP/qm" -name '*.qm' | wc -l)" -eq "$(find . -maxdepth 1 -name '*.ts' | wc -l)"
