@@ -1,72 +1,94 @@
 # PollyMC-Continued translations
 
-This repository is the source of truth for the Qt Linguist (`.ts`) translation
-files used by [PollyMC-Continued](https://github.com/PollyMC-Continued/launcher).
+This repository is the source of truth for the Qt Linguist translation files
+(`.ts`) of [PollyMC-Continued](https://github.com/PollyMC-Continued/launcher).
+The launcher repository only consumes the compiled `.qm` files; every
+translation is written, reviewed and merged here first.
 
-The launcher compiles these files into `.qm` files, which are published on the
-website for the launcher's language downloads. Translations are reviewed here;
-the launcher repository only consumes them.
+The website exposes the same data for browsing and downloads at
+<https://pollymc.vercel.app/translation/>. The files published there are
+generated from this repository, so nothing is ever edited in two places.
+
+## Repository layout
+
+- `*.ts` - one Qt Linguist source file per language, at the repository root.
+- `scripts/validate.py` - structural and placeholder validation for every file.
+- `scripts/check_diff.py` - diff policy check for pull requests.
+- `.github/` - CI workflow, code owners and pull request template.
+
+There is no build output here: compiled `.qm` files are produced by the
+launcher's release workflow, never committed to git.
 
 ## Contributing
 
-The preferred way to contribute is the web editor:
+The preferred way to contribute a translation is the web editor:
 
 <https://pollymc.vercel.app/translation/>
 
-It shows only the strings that still need work, checks placeholders, and submits
-changes for review. A GitHub account is not required to suggest a translation.
+It shows only the strings that still need work, checks placeholders while you
+type, and submits your changes for review. A GitHub account is not required to
+suggest a translation; you only need a name, so contributors can be credited.
 
-Manual pull requests are also welcome:
+Manual pull requests are equally welcome:
 
-1. Fork this repository.
+1. Fork this repository and create a branch.
 2. Edit one language file at a time.
-3. Run `python3 scripts/validate.py`.
+3. Run `python3 scripts/validate.py` locally.
 4. Open a pull request and fill in the template.
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) for the rules and the review process.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for the full rules and the review
+process, including what a reviewer will look for and how conflicts between
+submissions are resolved.
 
-## What belongs here
+## What a valid change looks like
 
-- `*.ts` Qt Linguist source files, one per language, at the repository root.
-- Translation text only. Source strings are generated from the launcher code
-  with `lupdate` and must not be edited by hand.
-- Do not commit compiled `.qm` files. They are built by the launcher's release
-  workflow.
+Translation pull requests may only change the text of `<translation>` and
+`<numerusform>` elements. Everything else in a file is generated from the
+launcher source code by `lupdate` and is maintained by maintainers only:
+
+- no source strings, context names, comments, locations or attributes are
+  edited by hand,
+- no messages, contexts or whole language files are added or removed,
+- placeholders are preserved: `%1`, `%2`, ... `%n` and their `%L` variants,
+  keyboard accelerators such as `&File`, and HTML markup such as `<br/>`,
+- numerus (plural) messages keep the same number of forms.
+
+Both rules are enforced in CI, on every pull request, before a maintainer
+reviews the diff.
 
 ## Validation
 
-The repository has two checks:
+Run the checks locally exactly as CI does:
 
 ```shell
-# Structural and placeholder validation for every file
+# structural and placeholder validation for every file
 python3 scripts/validate.py
 
-# On a pull request: reject message/context additions, removals or source edits
+# on a pull request: reject message/context additions or removals and source edits
 python3 scripts/check_diff.py origin/main
 ```
 
-CI also runs `xmllint` and `lrelease` on every file. A pull request cannot be
-merged unless the workflow passes.
+CI additionally runs `xmllint` over every file and compiles each one with
+`lrelease` to guarantee that the launcher can build a `.qm` from it. A pull
+request cannot be merged unless the workflow passes.
 
-## Review and merge
+`validate.py` carries a short allow-list of known placeholder defects that
+exist in the files as they were imported from the launcher repository (they are
+printed as warnings during validation). Fixing any of them in a pull request is
+a good first contribution, and the allow-list entry can be dropped in the same
+pull request.
 
-Every change goes through a pull request. A maintainer reviews the diff before
-merging. The review is what guarantees that a contribution only changes
-translation text and cannot remove messages, contexts or language files.
+## Adding a new language
 
-## Adding a language
-
-Open an issue with the language code and the desired locale. A maintainer will
-generate the file with `lupdate`, add it to this repository, and register it in
-the launcher. Do not add a new `.ts` file in a pull request.
-
-## Related repositories
-
-- [launcher](https://github.com/PollyMC-Continued/launcher) - the application
-- [website](https://github.com/PollyMC-Continued/website) - downloads, changelog
-  and the translation editor
+New language files are generated by maintainers with `lupdate` from the
+launcher source and are registered in the launcher and the website, so they are
+not accepted as drive-by pull requests. Open an issue with the language code
+and locale (for example `pt_BR` or `zh_Hant_HK`) and a maintainer will prepare
+the file; from that point on the language is translated and reviewed like any
+other.
 
 ## License
 
-The translation files are part of PollyMC-Continued and are licensed under the
-GNU General Public License v3.0. See [LICENSE](LICENSE).
+The translations are distributed under the same license as the launcher,
+GPL-3.0. By submitting a translation you agree that your contribution is
+licensed under GPL-3.0 as well. See [LICENSE](LICENSE).

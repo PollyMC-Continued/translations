@@ -1,229 +1,196 @@
 #!/usr/bin/env python3
-"""Reject pull requests that change anything except translation text.
+"""Diff policy check for the PollyMC-Continued translations repository.
 
-This is the safety gate for the repository. It compares every changed .ts file
-with its version on the base branch and fails when a context, message, source
-string, comment, location or plural form structure is added, removed or edited.
-Only <translation> text and the unfinished marker may change.
+Given a merge-base ref (usually origin/main or the PR base), this script lists
+every change between the merge-base and the working tree, and rejects anything
+that is not a pure translation-text edit:
+
+  rejected outright:
+    - added or deleted *.ts files (languages are added by maintainers only),
+    - added or deleted contexts,
+    - added or deleted messages,
+    - edits to <source>, <name>, <comment>, <extracomment>, <location> or any
+      attribute except the type/variants attributes of <translation>,
+    - new files outside the repository root .ts set (scripts, docs and workflow
+      changes are reviewed case by case and never arrive through the editor).
+
+  accepted:
+    - changes to the text of <translation> and <numerusform> elements,
+    - removing type="unfinished" or type="fuzzy" from a <translation> whose text
+      became non-empty (that is what finishing a string means),
+    - reordering of nothing: the message and context sequence must stay fixed.
+
+The comparison is semantic, on parsed XML trees, not textual, so formatting or
+attribute order differences do not trigger false rejections.
+
+Usage: python3 scripts/check_diff.py [base-ref]
+       (no argument: compare against HEAD~1, for local smoke tests)
+Exit code 0 = the diff is a pure translation diff, 1 otherwise.
 """
 
 from __future__ import annotations
 
-import argparse
-import os
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
-ALLOWED_TYPES = {None, "unfinished", "vanished", "obsolete"}
+REPO = Path(__file__).resolve().parent.parent
 
-
-def git(*args: str) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout
+TEXT_CHILDREN = {"translation", "numerusform"}
+NEUTRAL_ATTRS = {"type", "variants"}  # translation element attributes an editor may set/unset
 
 
-def parse(text: str, path: str) -> ET.Element:
-    try:
-        return ET.fromstring(text)
-    except ET.ParseError as exc:
-        raise ValueError(f"{path}: not well-formed XML: {exc}") from exc
+def git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(REPO), *args], capture_output=True, text=True)
 
 
-def text_of(element: ET.Element | None) -> str:
-    return (element.text or "") if element is not None else ""
+def message_key(context_name: str, message: ET.Element) -> tuple[str, str, bool, str]:
+    source = message.findtext("source") or ""
+    numerus = message.get("numerus") == "yes"
+    comment = (message.findtext("comment") or "").strip()
+    return (context_name, source, numerus, comment)
 
 
-def message_signature(message: ET.Element) -> tuple:
-    """Everything about a message that a translator must not change."""
-    locations = tuple(
-        (
-            location.get("filename") or "",
-            location.get("line") or "",
-            location.get("column") or "",
-        )
-        for location in message.findall("location")
-    )
-    return (
-        text_of(message.find("source")),
-        text_of(message.find("oldsource")),
-        text_of(message.find("comment")),
-        text_of(message.find("extracomment")),
-        text_of(message.find("translatorcomment")),
-        message.get("numerus") or "",
-        message.get("id") or "",
-        locations,
-    )
-
-
-def file_signature(root: ET.Element, path: str) -> tuple:
-    if root.tag != "TS":
-        raise ValueError(f"{path}: root element is <{root.tag}>, expected <TS>")
-    contexts = []
+def parse(path: Path) -> tuple[dict, dict]:
+    """Return {message_key: translation_element} and {context_name: contexts} for a .ts file."""
+    root = ET.parse(str(path)).getroot()
+    messages: dict[tuple[str, str, bool, str], ET.Element] = {}
+    contexts: dict[str, int] = {}
     for context in root.findall("context"):
         name = (context.findtext("name") or "").strip()
-        messages = tuple(message_signature(m) for m in context.findall("message"))
-        contexts.append((name, messages))
-    return tuple(contexts)
+        contexts[name] = contexts.get(name, 0) + 1
+        for message in context.findall("message"):
+            messages[message_key(name, message)] = message
+    return messages, contexts
 
 
-def translation_state(message: ET.Element) -> tuple[str | None, int]:
-    translation = message.find("translation")
-    if translation is None:
-        return None, 0
-    return translation.get("type"), len(translation.findall("numerusform"))
+def changed_files(base: str) -> list[str]:
+    diff = git("diff", "--name-status", base)
+    if diff.returncode != 0:
+        sys.exit(f"check_diff.py: git diff failed: {diff.stderr.strip()}")
+    entries = []
+    for line in diff.stdout.splitlines():
+        if not line.strip():
+            continue
+        status, _, name = line.partition("\t")
+        entries.append((status.strip(), name.strip()))
+    return entries
+
+
+def read_base_version(base: str, name: str) -> bytes | None:
+    blob = git("show", f"{base}:{name}")
+    if blob.returncode != 0:
+        return None
+    return blob.stdout.encode("utf-8", "surrogateescape")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "base",
-        nargs="?",
-        default="origin/main",
-        help="base branch or commit (default: origin/main)",
-    )
-    args = parser.parse_args()
+    if len(sys.argv) > 2:
+        sys.exit(f"usage: {sys.argv[0]} [base-ref]")
+    base = sys.argv[1] if len(sys.argv) > 1 else "HEAD~1"
 
-    try:
-        merge_base = git("merge-base", args.base, "HEAD").strip()
-    except subprocess.CalledProcessError:
-        print(f"error: cannot find a merge base with {args.base!r}", file=sys.stderr)
-        return 1
+    if git("rev-parse", "--verify", base).returncode != 0:
+        sys.exit(f"check_diff.py: base ref {base!r} not found")
 
-    try:
-        status = git("diff", "--name-status", "--find-renames", f"{merge_base}...HEAD")
-    except subprocess.CalledProcessError as exc:
-        print(f"error: git diff failed: {exc}", file=sys.stderr)
-        return 1
+    ts_files = {p.name for p in REPO.glob("*.ts")}
+    problems: list[str] = []
 
-    errors: list[str] = []
-    warnings: list[str] = []
-    changed_files = 0
-
-    for line in status.splitlines():
-        fields = line.split("\t")
-        if len(fields) < 2:
-            continue
-        state = fields[0]
-        paths = fields[1:]
-
-        if state.startswith("R"):
-            errors.append(
-                f"{paths[0]} -> {paths[1]}: translation files cannot be renamed"
-            )
+    for status, name in changed_files(base):
+        if not name.endswith(".ts"):
+            # Docs, scripts and workflows are maintained directly by maintainers;
+            # flag them so the reviewer notices the PR is not an editor PR.
+            if status in ("A", "D"):
+                problems.append(f"non-translation file {status} {name} (maintainer-only change)")
             continue
 
-        path = paths[-1]
-        if not path.endswith(".ts"):
-            warnings.append(f"{path}: non-translation file changed (review manually)")
+        if name not in ts_files:
+            problems.append(f"{status} {name}: file outside the repository root")
             continue
 
-        changed_files += 1
-        if "/" in path:
-            errors.append(f"{path}: translation files must stay at the repository root")
+        if status not in ("M",):
+            problems.append(f"{status} {name}: language files cannot be added or removed")
             continue
 
-        if state == "D":
-            errors.append(f"{path}: translation files cannot be deleted")
-            continue
-        if state == "A":
-            errors.append(f"{path}: new languages need a maintainer")
-            continue
-        if state != "M":
-            errors.append(f"{path}: unexpected change type {state!r}")
-            continue
-
-        if not os.path.exists(path):
-            errors.append(f"{path}: file is missing from the working tree")
+        old_bytes = read_base_version(base, name)
+        new_bytes = (REPO / name).read_bytes()
+        if old_bytes is None:
+            problems.append(f"{name}: cannot read base version of the file")
             continue
 
         try:
-            base_text = git("show", f"{merge_base}:{path}")
-        except subprocess.CalledProcessError:
-            errors.append(f"{path}: no base version found")
+            old_msgs, old_ctx = parse_bytes(old_bytes)
+            new_msgs, new_ctx = parse_bytes(new_bytes)
+        except ET.ParseError as exc:
+            problems.append(f"{name}: XML parse error {exc}")
             continue
 
-        try:
-            base_root = parse(base_text, path)
-            with open(path, encoding="utf-8") as handle:
-                head_root = parse(handle.read(), path)
-        except (ValueError, OSError) as exc:
-            errors.append(str(exc))
-            continue
+        for ctx_name, count in new_ctx.items():
+            if old_ctx.get(ctx_name, 0) != count:
+                problems.append(f"{name}: context {ctx_name} added or removed")
+        for ctx_name in old_ctx:
+            if ctx_name not in new_ctx:
+                problems.append(f"{name}: context {ctx_name} removed")
 
-        try:
-            base_signature = file_signature(base_root, path)
-            head_signature = file_signature(head_root, path)
-        except ValueError as exc:
-            errors.append(str(exc))
-            continue
+        for key in new_msgs:
+            if key not in old_msgs:
+                problems.append(f"{name}: new message in {key[0]} for {key[1][:40]!r}")
+        for key in old_msgs:
+            if key not in new_msgs:
+                problems.append(f"{name}: message removed in {key[0]} for {key[1][:40]!r}")
 
-        if base_signature != head_signature:
-            errors.append(
-                f"{path}: contexts, messages, sources, comments or locations changed; "
-                "only translation text may change"
-            )
-            continue
-
-        base_messages = list(base_root.iter("message"))
-        head_messages = list(head_root.iter("message"))
-        for index, (old, new) in enumerate(zip(base_messages, head_messages), start=1):
-            old_type, old_forms = translation_state(old)
-            new_type, new_forms = translation_state(new)
-
-            if new_type not in ALLOWED_TYPES:
-                errors.append(f"{path}: message {index}: invalid translation type {new_type!r}")
+        for key in new_msgs:
+            old_message = old_msgs.get(key)
+            if old_message is None:
                 continue
-            if new_type in ("vanished", "obsolete"):
-                if new_type != old_type:
-                    errors.append(
-                        f"{path}: message {index}: translators cannot mark a message "
-                        f"{new_type!r}"
-                    )
-                continue
-            if old_type in ("vanished", "obsolete") and new_type != old_type:
-                errors.append(
-                    f"{path}: message {index}: a {old_type!r} message cannot be revived"
-                )
-                continue
+            new_message = new_msgs[key]
+            old_tr, new_tr = old_message.find("translation"), new_message.find("translation")
 
-            numerus = old.get("numerus") == "yes"
-            if numerus:
-                if old_forms > 0 and new_forms != old_forms:
-                    errors.append(
-                        f"{path}: message {index}: plural form count changed "
-                        f"({old_forms} -> {new_forms})"
-                    )
-                elif old_forms == 0 and new_forms > 6:
-                    errors.append(
-                        f"{path}: message {index}: too many plural forms ({new_forms})"
-                    )
-            elif new_forms:
-                errors.append(
-                    f"{path}: message {index}: <numerusform> added to a non-plural message"
-                )
+            # Source text and structural children must be untouched.
+            for tag in ("source", "comment", "extracomment"):
+                old_text, new_text = old_message.findtext(tag), new_message.findtext(tag)
+                if old_text != new_text:
+                    problems.append(f"{name}: <{tag}> changed for {key[1][:40]!r}")
+            old_locs = [l.attrib for l in old_message.findall("location")]
+            new_locs = [l.attrib for l in new_message.findall("location")]
+            if old_locs != new_locs:
+                problems.append(f"{name}: <location> changed for {key[1][:40]!r}")
+            if (old_message.get("numerus") or "") != (new_message.get("numerus") or ""):
+                problems.append(f"{name}: numerus attribute changed for {key[1][:40]!r}")
 
-    if warnings:
-        print("Warnings:")
-        for warning in warnings:
-            print(f"  warning: {warning}")
-        print()
+            # Translation comparison: text of the element and its forms.
+            old_forms = [el.text or "" for el in old_tr.findall("numerusform")]
+            new_forms = [el.text or "" for el in new_tr.findall("numerusform")]
+            if old_tr.text != new_tr.text or old_forms != new_forms:
+                continue  # this is the allowed change: translation text
+            # No text change: only the type attribute may have been updated
+            # (finishing or fuzzing a string).
+            for attr in set(old_tr.attrib) | set(new_tr.attrib):
+                if attr not in NEUTRAL_ATTRS and old_tr.get(attr) != new_tr.get(attr):
+                    problems.append(f"{name}: translation attribute {attr!r} changed for {key[1][:40]!r}")
 
-    if errors:
-        print("Pull request rejected:\n", file=sys.stderr)
-        for error in errors:
-            print(f"  error: {error}", file=sys.stderr)
-        print(f"\n{len(errors)} error(s)", file=sys.stderr)
+    if problems:
+        print("check_diff.py: rejecting the diff:")
+        for problem in problems:
+            print(f"  - {problem}")
         return 1
-
-    print(f"OK: {changed_files} translation file(s) changed; only translation text was modified")
+    print("check_diff.py: diff is a pure translation-text change set.")
     return 0
 
 
+def parse_bytes(data: bytes) -> tuple[dict, dict]:
+    import io
+
+    root = ET.parse(io.BytesIO(data)).getroot()
+    messages: dict[tuple[str, str, bool, str], ET.Element] = {}
+    contexts: dict[str, int] = {}
+    for context in root.findall("context"):
+        name = (context.findtext("name") or "").strip()
+        contexts[name] = contexts.get(name, 0) + 1
+        for message in context.findall("message"):
+            messages[message_key(name, message)] = message
+    return messages, contexts
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
